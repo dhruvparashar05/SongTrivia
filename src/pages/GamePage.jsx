@@ -134,20 +134,19 @@ export default function GamePage({
   useEffect(() => {
     let isMounted = true;
     clearInterval(timerIntervalRef.current);
-    clearTimeout(autoAdvanceTimeoutRef.current);
-    setIsAutoAdvancing(false);
 
     async function checkState() {
       if (!currentSong || !participant?.id) return;
 
       // If already recorded in submissions
-      if (currentSubmission) {
+      const existingSub = submissions[currentSong.id];
+      if (existingSub) {
         setRoundState(
-          currentSubmission.submitted_answer === '[TIME_EXPIRED]' || currentSubmission.selected_option === 'EXPIRED'
+          existingSub.submitted_answer === '[TIME_EXPIRED]' || existingSub.selected_option === 'EXPIRED'
             ? 'time_expired'
             : 'submitted'
         );
-        setSelectedOption(currentSubmission.selected_option || null);
+        setSelectedOption(existingSub.selected_option || null);
         return;
       }
 
@@ -201,9 +200,8 @@ export default function GamePage({
     return () => {
       isMounted = false;
       clearInterval(timerIntervalRef.current);
-      clearTimeout(autoAdvanceTimeoutRef.current);
     };
-  }, [currentRoundIndex, currentSong?.id, participant?.id, currentSubmission]);
+  }, [currentRoundIndex, currentSong?.id, participant?.id]);
 
   // 3. Strict 10-Second Timer Engine (Calculated via Server-Side Deadline)
   const initAnswerTimer = (deadlineIso) => {
@@ -221,7 +219,7 @@ export default function GamePage({
 
       // Heartbeat pulse sound in last 3 seconds
       if (remainingSec <= 3 && remainingSec > 0) {
-        horrorSoundEngine.playWrongFX();
+        try { horrorSoundEngine.playWrongFX(); } catch (e) {}
       }
 
       if (remainingMs <= 0) {
@@ -280,7 +278,7 @@ export default function GamePage({
       setIsSubmitting(true);
       setRoundState('time_expired');
       setSelectedOption('EXPIRED');
-      horrorSoundEngine.playWrongFX();
+      try { horrorSoundEngine.playWrongFX(); } catch (e) {}
 
       const result = await horrorApi.submitAnswer(participant.id, currentSong.id, '[TIME_EXPIRED]');
 
@@ -367,13 +365,13 @@ export default function GamePage({
 
       if (showDirect) {
         if (result.is_correct) {
-          horrorSoundEngine.playCorrectFX();
+          try { horrorSoundEngine.playCorrectFX(); } catch (e) {}
           setSubmissionFeedback({
             type: 'correct',
             message: `CORRECT! Option ${selectedOption} is right. +10 Points!`
           });
         } else {
-          horrorSoundEngine.playWrongFX();
+          try { horrorSoundEngine.playWrongFX(); } catch (e) {}
           setSubmissionFeedback({
             type: 'wrong',
             message: result.is_expired 
@@ -383,7 +381,7 @@ export default function GamePage({
         }
       } else {
         // Standard secret reveal mode: confirm submission without leaking correctness
-        horrorSoundEngine.playHeartbeatFX();
+        try { horrorSoundEngine.playHeartbeatFX(); } catch (e) {}
         setSubmissionFeedback({
           type: 'submitted',
           message: `Answer Locked! Option ${selectedOption} submitted. Official results will be revealed by the organizer.`
@@ -427,9 +425,7 @@ export default function GamePage({
     setRoundState('ready');
     setAnswerDeadline(null);
     setAnswerTimeRemaining(10);
-    if (currentRoundIndex < totalRounds - 1) {
-      setCurrentRoundIndex(prev => prev + 1);
-    }
+    setCurrentRoundIndex(prev => (prev < totalRounds - 1 ? prev + 1 : prev));
   };
 
   // 8. UNREGISTERED STATE

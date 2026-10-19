@@ -461,6 +461,19 @@ class HorrorSoundEngine {
     this._playDeepBass(ctx, 55, now, 0.5);
   }
 
+  playHeartbeatFX() {
+    try {
+      const ctx = this.getAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      // Double heartbeat thud
+      this._playDeepBass(ctx, 60, now, 0.15);
+      this._playDeepBass(ctx, 48, now + 0.18, 0.22);
+    } catch (e) {
+      console.warn('Heartbeat FX error:', e);
+    }
+  }
+
   // Haunted House Ambient Drone (Background atmosphere)
   toggleAmbientDrone() {
     const ctx = this.getAudioContext();
