@@ -21,7 +21,7 @@ export default function GamePage({
   const [roundState, setRoundState] = useState('ready');
   const [answerDeadline, setAnswerDeadline] = useState(null);
   const [answerTimeRemaining, setAnswerTimeRemaining] = useState(10);
-  const [answerInput, setAnswerInput] = useState('');
+  const [selectedOption, setSelectedOption] = useState(null); // 'A' | 'B' | 'C' | 'D'
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionFeedback, setSubmissionFeedback] = useState(null);
   const [gameSettings, setGameSettings] = useState({ game_status: 'waiting', answers_revealed: false });
@@ -93,6 +93,7 @@ export default function GamePage({
       setSubmissions({});
       setSubmissionFeedback(null);
       setCurrentRoundIndex(0);
+      setSelectedOption(null);
       setRoundState('ready');
       setAnswerDeadline(null);
       setAnswerTimeRemaining(10);
@@ -136,7 +137,12 @@ export default function GamePage({
 
       // If already recorded in submissions
       if (currentSubmission) {
-        setRoundState(currentSubmission.submitted_answer === '[TIME_EXPIRED]' ? 'time_expired' : 'submitted');
+        setRoundState(
+          currentSubmission.submitted_answer === '[TIME_EXPIRED]' || currentSubmission.selected_option === 'EXPIRED'
+            ? 'time_expired'
+            : 'submitted'
+        );
+        setSelectedOption(currentSubmission.selected_option || null);
         return;
       }
 
@@ -147,8 +153,10 @@ export default function GamePage({
 
         if (stateData.state === 'submitted') {
           setRoundState('submitted');
+          setSelectedOption(stateData.selected_option || null);
         } else if (stateData.state === 'time_expired' || stateData.is_expired) {
           setRoundState('time_expired');
+          setSelectedOption('EXPIRED');
           setSubmissionFeedback({
             type: 'wrong',
             message: "TIME'S UP! The 10-second deadline expired. 0 points awarded."
@@ -172,6 +180,7 @@ export default function GamePage({
           }
         } else {
           setRoundState('ready');
+          setSelectedOption(null);
           setAnswerDeadline(null);
           setAnswerTimeRemaining(10);
         }
@@ -264,6 +273,7 @@ export default function GamePage({
     try {
       setIsSubmitting(true);
       setRoundState('time_expired');
+      setSelectedOption('EXPIRED');
       horrorSoundEngine.playWrongFX();
 
       const result = await horrorApi.submitAnswer(participant.id, currentSong.id, '[TIME_EXPIRED]');
@@ -273,6 +283,7 @@ export default function GamePage({
         [currentSong.id]: {
           song_id: currentSong.id,
           round_number: currentRoundNum,
+          selected_option: 'EXPIRED',
           submitted_answer: '[TIME_EXPIRED]',
           is_correct: false,
           points_awarded: 0
@@ -296,13 +307,10 @@ export default function GamePage({
     }
   };
 
-  // 7. Action: Manual Answer Submission (Before 10s Timer Expires)
+  // 7. Action: Manual MCQ Answer Submission (Before 10s Timer Expires)
   const handleSubmitAnswer = async (e) => {
-    e.preventDefault();
-    if (roundState !== 'answering' || isSubmitting || !currentSong) return;
-
-    const trimmed = answerInput.trim();
-    if (!trimmed) return;
+    if (e) e.preventDefault();
+    if (roundState !== 'answering' || isSubmitting || !currentSong || !selectedOption) return;
 
     // Check if time remaining > 0
     if (answerTimeRemaining <= 0) {
@@ -314,16 +322,20 @@ export default function GamePage({
       setIsSubmitting(true);
       clearInterval(timerIntervalRef.current);
 
-      const result = await horrorApi.submitAnswer(participant.id, currentSong.id, trimmed);
+      const result = await horrorApi.submitAnswer(participant.id, currentSong.id, selectedOption);
 
       setRoundState(result.is_expired ? 'time_expired' : 'submitted');
+
+      const optionKey = `option_${selectedOption.toLowerCase()}`;
+      const optionText = currentSong[optionKey] || selectedOption;
 
       setSubmissions(prev => ({
         ...prev,
         [currentSong.id]: {
           song_id: currentSong.id,
           round_number: currentRoundNum,
-          submitted_answer: result.is_expired ? '[TIME_EXPIRED]' : trimmed,
+          selected_option: result.selected_option || selectedOption,
+          submitted_answer: result.is_expired ? '[TIME_EXPIRED]' : optionText,
           is_correct: result.is_correct,
           points_awarded: result.points_awarded
         }
@@ -335,23 +347,33 @@ export default function GamePage({
         completedRounds: result.completed_rounds
       });
 
-      if (result.is_correct) {
-        horrorSoundEngine.playCorrectFX();
-        setSubmissionFeedback({
-          type: 'correct',
-          message: 'CORRECT! +10 Points awarded to your score.'
-        });
+      // Feedback display rule (Requirement 6)
+      const showDirect = Boolean(gameSettings.answers_revealed || gameSettings.immediate_feedback);
+
+      if (showDirect) {
+        if (result.is_correct) {
+          horrorSoundEngine.playCorrectFX();
+          setSubmissionFeedback({
+            type: 'correct',
+            message: `CORRECT! Option ${selectedOption} is right. +10 Points!`
+          });
+        } else {
+          horrorSoundEngine.playWrongFX();
+          setSubmissionFeedback({
+            type: 'wrong',
+            message: result.is_expired 
+              ? "LATE SUBMISSION! The 10-second timer expired. 0 points." 
+              : `MISSED! Option ${selectedOption} is incorrect. 0 points.`
+          });
+        }
       } else {
-        horrorSoundEngine.playWrongFX();
+        // Standard secret reveal mode: confirm submission without leaking correctness
+        horrorSoundEngine.playHeartbeatFX();
         setSubmissionFeedback({
-          type: 'wrong',
-          message: result.is_expired 
-            ? "LATE SUBMISSION! The 10-second timer expired. 0 points." 
-            : "MISSED! 0 points awarded for this round."
+          type: 'submitted',
+          message: `Answer Locked! Option ${selectedOption} submitted. Official results will be revealed by the organizer.`
         });
       }
-
-      setAnswerInput('');
 
       // Check if finished 30 rounds
       if (result.completed_rounds >= totalRounds) {
@@ -375,7 +397,7 @@ export default function GamePage({
 
   const handleNextRound = () => {
     setSubmissionFeedback(null);
-    setAnswerInput('');
+    setSelectedOption(null);
     setRoundState('ready');
     setAnswerDeadline(null);
     setAnswerTimeRemaining(10);
@@ -708,10 +730,10 @@ export default function GamePage({
         {isLocked ? (
           /* Locked State after submitting or expiration */
           <div className="p-6 rounded-2xl bg-zinc-950/80 border border-zinc-800/80 text-center">
-            <div className="flex items-center justify-center gap-2 mb-2">
+            <div className="flex items-center justify-center gap-2 mb-3">
               <Lock className="w-4 h-4 text-zinc-500" />
               <span className="text-xs font-mono uppercase tracking-wider text-zinc-400">
-                Round {currentRoundNum} Answer Locked
+                Round {currentRoundNum} &bull; Answer Locked
               </span>
             </div>
 
@@ -727,30 +749,96 @@ export default function GamePage({
               </div>
             ) : (
               <div className="my-3">
-                <div className="text-sm font-medium text-zinc-200 mb-2">
-                  Your submission: <span className="font-bold text-white bg-zinc-900 px-3 py-1 rounded border border-zinc-800">&ldquo;{currentSubmission?.submitted_answer}&rdquo;</span>
-                </div>
-
-                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold">
-                  {currentSubmission?.is_correct ? (
-                    <span className="bg-emerald-950 text-emerald-300 border border-emerald-800 px-3.5 py-1 rounded-full flex items-center gap-1.5 shadow-[0_0_15px_rgba(16,185,129,0.3)]">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                      CORRECT &bull; +10 POINTS
-                    </span>
-                  ) : (
-                    <span className="bg-red-950 text-red-400 border border-red-800 px-3.5 py-1 rounded-full flex items-center gap-1.5">
-                      <XCircle className="w-3.5 h-3.5 text-red-500" />
-                      MISSED &bull; 0 POINTS
-                    </span>
-                  )}
-                </div>
+                {/* Check if answers revealed */}
+                {gameSettings.answers_revealed ? (
+                  <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold mb-3">
+                    {currentSubmission?.is_correct ? (
+                      <span className="bg-emerald-950 text-emerald-300 border border-emerald-800 px-3.5 py-1 rounded-full flex items-center gap-1.5 shadow-[0_0_15px_rgba(16,185,129,0.3)]">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        CORRECT &bull; +10 POINTS
+                      </span>
+                    ) : (
+                      <span className="bg-red-950 text-red-400 border border-red-800 px-3.5 py-1 rounded-full flex items-center gap-1.5">
+                        <XCircle className="w-3.5 h-3.5 text-red-500" />
+                        MISSED &bull; 0 POINTS
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-mono font-semibold bg-zinc-900 border border-zinc-800 text-zinc-300 mb-3">
+                    <ShieldAlert className="w-3.5 h-3.5 text-red-500" />
+                    <span>Response Secured &bull; Results Revealed by Organizer</span>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Revealed Official Answer (if organizer enabled reveal mode) */}
+            {/* 4 Options in Locked Review Display */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 my-4 text-left">
+              {[
+                { key: 'A', text: currentSong?.option_a },
+                { key: 'B', text: currentSong?.option_b },
+                { key: 'C', text: currentSong?.option_c },
+                { key: 'D', text: currentSong?.option_d }
+              ].map(opt => {
+                const isSelected = (currentSubmission?.selected_option || selectedOption) === opt.key;
+                const isCorrect = gameSettings.answers_revealed && currentSong?.correct_option === opt.key;
+                const isWrongSelection = gameSettings.answers_revealed && isSelected && !isCorrect;
+
+                let cardStyle = "border-zinc-900 bg-[#08080c] opacity-40 text-zinc-500";
+                let badgeStyle = "bg-zinc-900 border border-zinc-800 text-zinc-600";
+
+                if (isCorrect) {
+                  cardStyle = "border-emerald-500 bg-emerald-950/70 shadow-[0_0_20px_rgba(16,185,129,0.4)] text-emerald-100 opacity-100 ring-1 ring-emerald-500";
+                  badgeStyle = "bg-emerald-600 text-white font-bold shadow";
+                } else if (isWrongSelection) {
+                  cardStyle = "border-red-600 bg-red-950/70 shadow-[0_0_20px_rgba(220,38,38,0.4)] text-red-200 opacity-100 ring-1 ring-red-600";
+                  badgeStyle = "bg-red-700 text-white font-bold";
+                } else if (isSelected) {
+                  cardStyle = "border-red-500/80 bg-red-950/50 shadow-[0_0_15px_rgba(220,38,38,0.3)] text-zinc-100 opacity-100";
+                  badgeStyle = "bg-red-600 text-white font-bold";
+                }
+
+                return (
+                  <div
+                    key={opt.key}
+                    className={`min-h-[58px] p-3.5 sm:p-4 rounded-2xl border flex items-center justify-between gap-3 transition-all ${cardStyle}`}
+                  >
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                      <span className={`w-8 h-8 rounded-xl flex items-center justify-center font-cinzel text-xs shrink-0 ${badgeStyle}`}>
+                        {opt.key}
+                      </span>
+                      <span className="text-sm font-medium leading-snug truncate">
+                        {opt.text || `Option ${opt.key}`}
+                      </span>
+                    </div>
+
+                    <div className="shrink-0 text-right">
+                      {isCorrect && (
+                        <span className="text-[10px] font-mono font-bold uppercase text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
+                          {isSelected ? 'YOUR PICK &bull; CORRECT' : 'CORRECT ANSWER'}
+                        </span>
+                      )}
+                      {isWrongSelection && (
+                        <span className="text-[10px] font-mono font-bold uppercase text-red-400 bg-red-950 px-2 py-0.5 rounded border border-red-800">
+                          YOUR PICK &bull; MISSED
+                        </span>
+                      )}
+                      {!gameSettings.answers_revealed && isSelected && (
+                        <span className="text-[10px] font-mono font-bold uppercase text-red-300 bg-red-950/80 px-2 py-0.5 rounded border border-red-800">
+                          YOUR SELECTION
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Revealed Canonical Info (if organizer enabled reveal mode) */}
             {gameSettings.answers_revealed && currentSong?.correct_answer && (
               <div className="mt-3 p-3 bg-red-950/30 border border-red-900/50 rounded-xl text-xs text-red-200 max-w-md mx-auto">
-                Revealed Official Title: <span className="font-bold text-white">{currentSong.correct_answer}</span>
+                Official Answer: <span className="font-bold text-white">Option {currentSong.correct_option}: {currentSong.correct_answer}</span>
               </div>
             )}
 
@@ -778,29 +866,43 @@ export default function GamePage({
             )}
           </div>
         ) : roundState === 'ready' ? (
-          /* Ready State: Prompt user to play audio first */
+          /* Ready State: Prompt user to play audio first before choices unlock */
           <div className="p-6 rounded-2xl bg-zinc-950/60 border border-zinc-900 text-center">
             <Volume2 className="w-8 h-8 text-zinc-500 mx-auto mb-2 animate-pulse" />
             <h4 className="text-sm font-semibold text-zinc-300 mb-1">
               Audio Playback Required First
             </h4>
-            <p className="text-xs text-zinc-500 max-w-md mx-auto leading-relaxed mb-4">
-              Click <span className="text-red-400 font-bold">&ldquo;START AUDIO CLIP&rdquo;</span> above. The clip will play once. Immediately upon completion, the strict 10-second answer timer begins.
+            <p className="text-xs text-zinc-500 max-w-md mx-auto leading-relaxed mb-6">
+              Click <span className="text-red-400 font-bold">&ldquo;START AUDIO CLIP&rdquo;</span> above. The clip will play once. Immediately upon completion, all four multiple-choice options unlock for the strict 10-second countdown!
             </p>
-            <input
-              type="text"
-              disabled
-              placeholder="Input locked until audio playback finishes..."
-              className="w-full max-w-md mx-auto px-4 py-3 bg-[#08080c] border border-zinc-900 rounded-xl text-zinc-600 text-sm outline-none cursor-not-allowed text-center"
-            />
+
+            {/* Preview of 4 options in disabled state */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xl mx-auto opacity-40 cursor-not-allowed select-none">
+              {['A', 'B', 'C', 'D'].map(letter => {
+                const optKey = `option_${letter.toLowerCase()}`;
+                const text = currentSong?.[optKey] || `Option ${letter}`;
+                return (
+                  <div
+                    key={letter}
+                    className="p-3.5 rounded-xl border border-zinc-900 bg-[#08080c] flex items-center gap-3 text-left"
+                  >
+                    <span className="w-8 h-8 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-500 flex items-center justify-center font-cinzel text-xs font-bold">
+                      {letter}
+                    </span>
+                    <span className="text-xs text-zinc-500 truncate">{text}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         ) : (
-          /* Active Answering Input Form (During 10-second countdown) */
-          <form onSubmit={handleSubmitAnswer} className="space-y-4">
+          /* Active Answering Interface: 4 Clickable MCQ Option Cards */
+          <div className="space-y-5">
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs font-semibold uppercase tracking-wider text-zinc-200">
-                  Identify The Song or Horror Movie Theme
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs font-bold uppercase tracking-wider text-zinc-200 flex items-center gap-1.5">
+                  <span className="text-red-500">&bull;</span>
+                  <span>Select The Correct Song / Theme (Options A - D)</span>
                 </label>
                 <span className={`text-xs font-mono font-bold ${
                   isTimerCritical ? 'text-red-400 animate-pulse' : 'text-amber-400'
@@ -809,63 +911,106 @@ export default function GamePage({
                 </span>
               </div>
 
-              <div className="relative">
-                <input
-                  type="text"
-                  value={answerInput}
-                  onChange={(e) => setAnswerInput(e.target.value)}
-                  placeholder="Type song title or theme name..."
-                  disabled={isSubmitting || answerTimeRemaining <= 0}
-                  autoFocus
-                  className={`w-full px-4 py-3.5 bg-[#08080c] border rounded-xl text-zinc-100 placeholder-zinc-600 text-sm outline-none transition-all ${
-                    isTimerCritical 
-                      ? 'border-red-600 focus:ring-2 focus:ring-red-600' 
-                      : 'border-zinc-800 focus:border-red-600 focus:ring-1 focus:ring-red-600'
-                  }`}
-                />
+              {/* 4 Selectable Answer Cards (2x2 Grid) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
+                {[
+                  { key: 'A', text: currentSong?.option_a },
+                  { key: 'B', text: currentSong?.option_b },
+                  { key: 'C', text: currentSong?.option_c },
+                  { key: 'D', text: currentSong?.option_d }
+                ].map(opt => {
+                  const isSelected = selectedOption === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      disabled={isSubmitting || answerTimeRemaining <= 0}
+                      onClick={() => setSelectedOption(opt.key)}
+                      className={`min-h-[64px] p-4 rounded-2xl border text-left flex items-center justify-between gap-3.5 transition-all cursor-pointer select-none active:scale-[0.98] ${
+                        isSelected
+                          ? 'border-red-500 bg-red-950/80 shadow-[0_0_25px_rgba(220,38,38,0.6)] ring-2 ring-red-500 text-white'
+                          : 'border-zinc-800/90 bg-[#0c0c14] hover:border-red-900/80 hover:bg-zinc-900/70 text-zinc-300 hover:text-white'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      <div className="flex items-center gap-3.5 flex-1 min-w-0">
+                        <span className={`w-9 h-9 rounded-xl flex items-center justify-center font-cinzel font-black text-sm shrink-0 transition-all ${
+                          isSelected
+                            ? 'bg-red-600 text-white shadow-[0_0_12px_rgba(220,38,38,0.8)]'
+                            : 'bg-zinc-900 border border-zinc-800 text-zinc-400'
+                        }`}>
+                          {opt.key}
+                        </span>
+                        <span className="text-sm sm:text-base font-semibold leading-snug break-words">
+                          {opt.text || `Option ${opt.key}`}
+                        </span>
+                      </div>
+
+                      {/* Selection Radio Indicator */}
+                      <div className="shrink-0 pl-2">
+                        {isSelected ? (
+                          <div className="w-5 h-5 rounded-full bg-red-600 border border-red-400 flex items-center justify-center shadow-[0_0_10px_rgba(220,38,38,0.9)]">
+                            <div className="w-2 h-2 rounded-full bg-white" />
+                          </div>
+                        ) : (
+                          <div className="w-5 h-5 rounded-full border border-zinc-700 bg-zinc-900/80" />
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
 
-              <p className="text-[11px] text-zinc-500 mt-1.5 flex items-center gap-1.5">
-                <AlertCircle className="w-3.5 h-3.5 text-zinc-500" />
-                <span>Single submission allowed. Automatic submission when timer reaches zero.</span>
+              <p className="text-[11px] text-zinc-500 mt-2.5 flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                <span>You can change your selection anytime before submitting or before the 10s timer expires.</span>
               </p>
             </div>
 
             {/* Submission Feedback Message */}
             {submissionFeedback && (
-              <div className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+              <div className={`p-3.5 rounded-xl border text-xs flex items-center gap-2.5 ${
                 submissionFeedback.type === 'correct'
                   ? 'bg-emerald-950/70 border-emerald-700 text-emerald-200'
-                  : 'bg-red-950/70 border-red-700 text-red-200'
+                  : submissionFeedback.type === 'wrong'
+                  ? 'bg-red-950/70 border-red-700 text-red-200'
+                  : 'bg-zinc-900/90 border-zinc-700 text-zinc-200'
               }`}>
                 {submissionFeedback.type === 'correct' ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                ) : (
+                ) : submissionFeedback.type === 'wrong' ? (
                   <XCircle className="w-4 h-4 text-red-400 shrink-0" />
+                ) : (
+                  <Lock className="w-4 h-4 text-amber-400 shrink-0" />
                 )}
                 <span>{submissionFeedback.message}</span>
               </div>
             )}
 
+            {/* Submit Answer Button */}
             <button
-              type="submit"
-              disabled={isSubmitting || !answerInput.trim() || answerTimeRemaining <= 0}
-              className={`w-full py-3.5 rounded-xl font-extrabold text-sm tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer border ${
-                isTimerCritical
-                  ? 'bg-red-600 hover:bg-red-500 text-white border-red-500 shadow-[0_0_25px_rgba(220,38,38,0.8)] animate-pulse'
-                  : 'bg-red-600 hover:bg-red-500 text-white border-red-500 shadow-[0_0_20px_rgba(220,38,38,0.6)]'
+              type="button"
+              onClick={handleSubmitAnswer}
+              disabled={isSubmitting || !selectedOption || answerTimeRemaining <= 0}
+              className={`w-full py-4 rounded-xl font-extrabold text-sm tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer border ${
+                selectedOption
+                  ? isTimerCritical
+                    ? 'bg-red-600 hover:bg-red-500 text-white border-red-500 shadow-[0_0_30px_rgba(220,38,38,0.9)] animate-pulse'
+                    : 'bg-red-600 hover:bg-red-500 text-white border-red-500 shadow-[0_0_20px_rgba(220,38,38,0.7)]'
+                  : 'bg-zinc-900 text-zinc-500 border-zinc-800 cursor-not-allowed opacity-50'
               } disabled:opacity-40 disabled:cursor-not-allowed`}
             >
               {isSubmitting ? (
                 <span className="flex items-center gap-2">
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  EVALUATING ANSWER...
+                  LOCKING IN SUBMISSION...
                 </span>
+              ) : selectedOption ? (
+                <span>SUBMIT OPTION {selectedOption} ({answerTimeRemaining}s LEFT)</span>
               ) : (
-                <span>SUBMIT ANSWER ({answerTimeRemaining}s LEFT)</span>
+                <span>SELECT AN OPTION TO SUBMIT ({answerTimeRemaining}s LEFT)</span>
               )}
             </button>
-          </form>
+          </div>
         )}
       </div>
 

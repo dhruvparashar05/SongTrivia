@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS public.songs (
   title TEXT NOT NULL,
   audio_path TEXT,
   duration_seconds NUMERIC DEFAULT 8.0 CHECK (duration_seconds >= 1.0 AND duration_seconds <= 30.0),
+  option_a TEXT NOT NULL DEFAULT '',
+  option_b TEXT NOT NULL DEFAULT '',
+  option_c TEXT NOT NULL DEFAULT '',
+  option_d TEXT NOT NULL DEFAULT '',
+  correct_option TEXT NOT NULL DEFAULT 'A' CHECK (correct_option IN ('A', 'B', 'C', 'D')),
   correct_answer TEXT NOT NULL,
   accepted_answers TEXT[] DEFAULT '{}'::TEXT[],
   hint TEXT,
@@ -82,6 +87,7 @@ CREATE TABLE IF NOT EXISTS public.submissions (
   participant_id UUID NOT NULL REFERENCES public.participants(id) ON DELETE CASCADE,
   song_id UUID NOT NULL REFERENCES public.songs(id) ON DELETE CASCADE,
   round_number INT NOT NULL,
+  selected_option TEXT,
   submitted_answer TEXT NOT NULL,
   is_correct BOOLEAN NOT NULL DEFAULT FALSE,
   points_awarded INT NOT NULL DEFAULT 0 CHECK (points_awarded IN (0, 10)),
@@ -425,11 +431,11 @@ BEGIN
 END;
 $$;
 
--- 4. SECURE ANSWER SUBMISSION RPC (WITH SERVER DEADLINE ENFORCEMENT)
+-- 4. SECURE MCQ ANSWER SUBMISSION RPC (WITH SERVER DEADLINE ENFORCEMENT)
 CREATE OR REPLACE FUNCTION public.submit_song_answer(
   p_participant_id UUID,
   p_song_id UUID,
-  p_submitted_answer TEXT
+  p_selected_option TEXT
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -439,16 +445,16 @@ DECLARE
   v_game_status TEXT;
   v_song RECORD;
   v_session RECORD;
-  v_normalized_sub TEXT;
-  v_normalized_correct TEXT;
+  v_clean_selected TEXT;
+  v_clean_correct TEXT;
   v_is_correct BOOLEAN := FALSE;
   v_points INT := 0;
   v_total_score INT;
   v_correct_count INT;
   v_completed_rounds INT;
-  v_accepted TEXT;
   v_now TIMESTAMP WITH TIME ZONE := NOW();
   v_is_expired BOOLEAN := FALSE;
+  v_option_text TEXT;
 BEGIN
   -- 1. Check game status
   SELECT game_status INTO v_game_status FROM public.game_settings WHERE id = 1;
@@ -484,7 +490,6 @@ BEGIN
   WHERE participant_id = p_participant_id AND song_id = p_song_id;
 
   IF FOUND THEN
-    -- If already submitted or time expired, reject
     IF v_session.state = 'submitted' THEN
       RETURN jsonb_build_object(
         'success', false,
@@ -498,53 +503,59 @@ BEGIN
     END IF;
   END IF;
 
-  -- 5. If expired or passed as empty/expired, award 0 points
-  IF v_is_expired OR TRIM(p_submitted_answer) = '[TIME_EXPIRED]' THEN
+  -- Clean input
+  v_clean_selected := UPPER(TRIM(COALESCE(p_selected_option, '')));
+
+  -- 5. If expired or empty
+  IF v_is_expired OR v_clean_selected IN ('', 'EXPIRED', '[TIME_EXPIRED]') THEN
+    v_clean_selected := 'EXPIRED';
     v_is_correct := FALSE;
     v_points := 0;
-    
+    v_option_text := '[TIME_EXPIRED]';
+
     UPDATE public.round_sessions
     SET state = 'time_expired', submitted_at = v_now
     WHERE participant_id = p_participant_id AND song_id = p_song_id;
   ELSE
-    -- 6. Normalize answers
-    v_normalized_sub := public.normalize_horror_answer(p_submitted_answer);
-    v_normalized_correct := public.normalize_horror_answer(v_song.correct_answer);
-
-    -- Compare normalized strings
-    IF v_normalized_sub = v_normalized_correct AND LENGTH(v_normalized_sub) > 0 THEN
-      v_is_correct := TRUE;
-    ELSE
-      -- Check accepted variations
-      IF v_song.accepted_answers IS NOT NULL THEN
-        FOREACH v_accepted IN ARRAY v_song.accepted_answers
-        LOOP
-          IF v_normalized_sub = public.normalize_horror_answer(v_accepted) AND LENGTH(v_normalized_sub) > 0 THEN
-            v_is_correct := TRUE;
-            EXIT;
-          END IF;
-        END LOOP;
-      END IF;
+    -- 6. Validate MCQ selection: must be A, B, C, or D
+    IF v_clean_selected NOT IN ('A', 'B', 'C', 'D') THEN
+      RETURN jsonb_build_object(
+        'success', false,
+        'error', 'Invalid option selected. Please select A, B, C, or D.'
+      );
     END IF;
 
-    -- Award points
-    IF v_is_correct THEN
+    -- Compare with stored correct_option
+    v_clean_correct := UPPER(TRIM(COALESCE(v_song.correct_option, 'A')));
+
+    IF v_clean_selected = v_clean_correct THEN
+      v_is_correct := TRUE;
       v_points := 10;
     ELSE
+      v_is_correct := FALSE;
       v_points := 0;
     END IF;
 
-    -- Update session state
+    -- Get corresponding option text for audit
+    CASE v_clean_selected
+      WHEN 'A' THEN v_option_text := v_song.option_a;
+      WHEN 'B' THEN v_option_text := v_song.option_b;
+      WHEN 'C' THEN v_option_text := v_song.option_c;
+      WHEN 'D' THEN v_option_text := v_song.option_d;
+      ELSE v_option_text := '';
+    END CASE;
+
     UPDATE public.round_sessions
     SET state = 'submitted', submitted_at = v_now
     WHERE participant_id = p_participant_id AND song_id = p_song_id;
   END IF;
 
-  -- 7. Insert submission record (atomic insert protected by UNIQUE constraint)
+  -- 7. Insert submission record atomically
   INSERT INTO public.submissions (
     participant_id,
     song_id,
     round_number,
+    selected_option,
     submitted_answer,
     is_correct,
     points_awarded
@@ -552,7 +563,8 @@ BEGIN
     p_participant_id,
     p_song_id,
     v_song.round_number,
-    CASE WHEN v_is_expired THEN '[TIME_EXPIRED]' ELSE p_submitted_answer END,
+    v_clean_selected,
+    v_option_text,
     v_is_correct,
     v_points
   );
@@ -581,10 +593,11 @@ BEGIN
     END
   WHERE id = p_participant_id;
 
-  -- 9. Return result without revealing correct answer
+  -- 9. Return result without revealing correct option unless game revealed
   RETURN jsonb_build_object(
     'success', true,
     'round_number', v_song.round_number,
+    'selected_option', v_clean_selected,
     'is_correct', v_is_correct,
     'is_expired', v_is_expired,
     'points_awarded', v_points,
@@ -595,7 +608,7 @@ BEGIN
 END;
 $$;
 
--- Secure public view/function to get song list without exposing answers until revealed
+-- Secure public function to get playable songs without exposing answers or correct_option until revealed
 CREATE OR REPLACE FUNCTION public.get_playable_songs()
 RETURNS TABLE (
   id UUID,
@@ -603,8 +616,12 @@ RETURNS TABLE (
   audio_path TEXT,
   duration_seconds NUMERIC,
   hint TEXT,
+  option_a TEXT,
+  option_b TEXT,
+  option_c TEXT,
+  option_d TEXT,
+  correct_option TEXT,
   correct_answer TEXT,
-  accepted_answers TEXT[],
   created_at TIMESTAMP WITH TIME ZONE
 )
 LANGUAGE plpgsql
@@ -622,8 +639,12 @@ BEGIN
     s.audio_path,
     COALESCE(s.duration_seconds, 8.0) AS duration_seconds,
     s.hint,
+    s.option_a,
+    s.option_b,
+    s.option_c,
+    s.option_d,
+    CASE WHEN COALESCE(v_revealed, false) = true THEN s.correct_option ELSE NULL END AS correct_option,
     CASE WHEN COALESCE(v_revealed, false) = true THEN s.correct_answer ELSE NULL END AS correct_answer,
-    CASE WHEN COALESCE(v_revealed, false) = true THEN s.accepted_answers ELSE NULL END AS accepted_answers,
     s.created_at
   FROM public.songs s
   ORDER BY s.round_number ASC;

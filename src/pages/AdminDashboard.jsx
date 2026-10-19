@@ -27,6 +27,7 @@ export default function AdminDashboard({ onAdminStateChange }) {
 
   const [activeTab, setActiveTab] = useState('songs'); // 'songs' | 'live' | 'answers'
   const [editingRound, setEditingRound] = useState(null); // song object being edited
+  const [editModalError, setEditModalError] = useState('');
   const [uploadingRound, setUploadingRound] = useState(null);
   const [uploadError, setUploadError] = useState('');
   const [audioPreviewUrl, setAudioPreviewUrl] = useState(null);
@@ -91,8 +92,53 @@ export default function AdminDashboard({ onAdminStateChange }) {
     setSession(null);
   };
 
-  // Update Game Status
+  // Update Game Status (with strict 30-round validation on start/activate)
   const handleStatusChange = async (newStatus) => {
+    if (newStatus === 'active') {
+      // Requirement 10: Validate that all 30 rounds are configured correctly before allowing the organizer to start the game.
+      const invalidRounds = [];
+
+      for (let r = 1; r <= 30; r++) {
+        const song = songs.find(s => s.round_number === r);
+        if (!song) {
+          invalidRounds.push(`Round ${r}: Missing song entry`);
+          continue;
+        }
+
+        const optA = (song.option_a || '').trim();
+        const optB = (song.option_b || '').trim();
+        const optC = (song.option_c || '').trim();
+        const optD = (song.option_d || '').trim();
+        const correctOpt = (song.correct_option || '').trim().toUpperCase();
+
+        if (!optA || !optB || !optC || !optD) {
+          invalidRounds.push(`Round ${r}: Options A, B, C, D must all be filled`);
+          continue;
+        }
+
+        if (!['A', 'B', 'C', 'D'].includes(correctOpt)) {
+          invalidRounds.push(`Round ${r}: Must select a correct option (A, B, C, or D)`);
+          continue;
+        }
+
+        // Duplicate check (ignoring capitalization and extra spaces)
+        const norm = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
+        const set = new Set([norm(optA), norm(optB), norm(optC), norm(optD)]);
+        if (set.size < 4) {
+          invalidRounds.push(`Round ${r}: Duplicate options found`);
+        }
+      }
+
+      if (invalidRounds.length > 0) {
+        alert(
+          `Cannot start the game! All 30 rounds must have 4 unique options and 1 correct answer.\n\nIssues found (${invalidRounds.length}):\n` +
+          invalidRounds.slice(0, 8).join('\n') +
+          (invalidRounds.length > 8 ? `\n...and ${invalidRounds.length - 8} more` : '')
+        );
+        return;
+      }
+    }
+
     try {
       const updated = await horrorApi.updateGameSettings({ game_status: newStatus });
       setGameSettings(prev => ({ ...prev, game_status: newStatus }));
@@ -114,14 +160,19 @@ export default function AdminDashboard({ onAdminStateChange }) {
     }
   };
 
-  // Seed 30 Default Songs
+  // Seed 30 Default Songs with MCQ options
   const handleSeedSongs = async () => {
-    if (!confirm('Populate 30 iconic horror songs & motifs? This will update empty rounds.')) return;
+    if (!confirm('Populate 30 iconic horror songs with 4 multiple-choice options? This will update empty rounds.')) return;
     try {
       for (const song of DEFAULT_HORROR_SONGS) {
         await horrorApi.saveSong({
           round_number: song.round_number,
           title: song.title,
+          option_a: song.option_a,
+          option_b: song.option_b,
+          option_c: song.option_c,
+          option_d: song.option_d,
+          correct_option: song.correct_option,
           correct_answer: song.correct_answer,
           accepted_answers: song.accepted_answers,
           hint: song.hint,
@@ -130,23 +181,61 @@ export default function AdminDashboard({ onAdminStateChange }) {
         });
       }
       await loadAdminData();
-      showSuccessBanner('All 30 iconic horror songs successfully seeded!');
+      showSuccessBanner('All 30 iconic horror songs & MCQ options successfully seeded!');
     } catch (e) {
       alert('Error seeding songs: ' + e.message);
     }
   };
 
-  // Save single song edit
+  // Save single song edit with MCQ validation
   const handleSaveSongEdit = async (e) => {
     e.preventDefault();
     if (!editingRound) return;
+
+    setEditModalError('');
+
+    const optA = (editingRound.option_a || '').trim();
+    const optB = (editingRound.option_b || '').trim();
+    const optC = (editingRound.option_c || '').trim();
+    const optD = (editingRound.option_d || '').trim();
+    const correctOpt = (editingRound.correct_option || '').trim().toUpperCase();
+
+    // 1. Require all four options to be filled
+    if (!optA || !optB || !optC || !optD) {
+      setEditModalError('All four options (Option A, Option B, Option C, and Option D) must be filled.');
+      return;
+    }
+
+    // 2. Require exactly one correct answer
+    if (!['A', 'B', 'C', 'D'].includes(correctOpt)) {
+      setEditModalError('Exactly one correct answer option (A, B, C, or D) must be selected.');
+      return;
+    }
+
+    // 3. Prevent duplicate options within the same question (ignoring capitalization and extra spaces)
+    const norm = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
+    const optionsNorm = [norm(optA), norm(optB), norm(optC), norm(optD)];
+    const uniqueOptions = new Set(optionsNorm);
+    if (uniqueOptions.size < 4) {
+      setEditModalError('Duplicate options detected! All four options must be unique (ignoring capitalization and spacing).');
+      return;
+    }
+
     try {
-      await horrorApi.saveSong(editingRound);
+      await horrorApi.saveSong({
+        ...editingRound,
+        option_a: optA,
+        option_b: optB,
+        option_c: optC,
+        option_d: optD,
+        correct_option: correctOpt
+      });
       setEditingRound(null);
+      setEditModalError('');
       await loadAdminData();
-      showSuccessBanner(`Round ${editingRound.round_number} updated.`);
+      showSuccessBanner(`Round ${editingRound.round_number} options saved.`);
     } catch (e) {
-      alert('Error saving round: ' + e.message);
+      setEditModalError(e.message || 'Error saving round.');
     }
   };
 
@@ -540,9 +629,9 @@ export default function AdminDashboard({ onAdminStateChange }) {
                 <thead>
                   <tr className="bg-zinc-950 text-zinc-400 text-[11px] font-mono uppercase border-b border-zinc-800">
                     <th className="py-3 px-4">Round</th>
-                    <th className="py-3 px-4">Song / Title</th>
-                    <th className="py-3 px-4">Correct Answer</th>
-                    <th className="py-3 px-4 hidden md:table-cell">Accepted Variations</th>
+                    <th className="py-3 px-4">Track Title</th>
+                    <th className="py-3 px-4">4 Multiple-Choice Options</th>
+                    <th className="py-3 px-4 text-center">Correct</th>
                     <th className="py-3 px-4 text-center">Audio Clip</th>
                     <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
@@ -550,19 +639,49 @@ export default function AdminDashboard({ onAdminStateChange }) {
                 <tbody className="divide-y divide-zinc-900">
                   {songs.map((song) => {
                     const hasAudio = Boolean(song.audio_path);
+                    const corrOpt = song.correct_option || 'A';
                     return (
                       <tr key={song.round_number} className="hover:bg-zinc-900/40 transition-colors">
                         <td className="py-3.5 px-4 font-mono font-bold text-red-400">
                           #{song.round_number}
                         </td>
                         <td className="py-3.5 px-4 font-semibold text-zinc-200">
-                          {song.title || 'Untitled Round'}
+                          {song.title || `Round ${song.round_number}`}
                         </td>
-                        <td className="py-3.5 px-4 text-zinc-100 font-mono text-xs">
-                          {song.correct_answer || '<Not Set>'}
+                        <td className="py-3.5 px-4">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-w-lg">
+                            {[
+                              { k: 'A', text: song.option_a },
+                              { k: 'B', text: song.option_b },
+                              { k: 'C', text: song.option_c },
+                              { k: 'D', text: song.option_d }
+                            ].map(item => {
+                              const isCorr = corrOpt === item.k;
+                              return (
+                                <div 
+                                  key={item.k} 
+                                  className={`text-xs px-2 py-1 rounded-lg border flex items-center gap-1.5 truncate ${
+                                    isCorr 
+                                      ? 'bg-emerald-950/70 border-emerald-700/80 text-emerald-200 font-semibold' 
+                                      : 'bg-zinc-950 border-zinc-900 text-zinc-400'
+                                  }`}
+                                >
+                                  <span className={`w-4 h-4 rounded text-[10px] flex items-center justify-center font-bold font-mono shrink-0 ${
+                                    isCorr ? 'bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-500'
+                                  }`}>
+                                    {item.k}
+                                  </span>
+                                  <span className="truncate">{item.text || `<Empty ${item.k}>`}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
                         </td>
-                        <td className="py-3.5 px-4 text-zinc-400 text-xs hidden md:table-cell max-w-[200px] truncate">
-                          {Array.isArray(song.accepted_answers) ? song.accepted_answers.join(', ') : song.accepted_answers}
+                        <td className="py-3.5 px-4 text-center">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                            Option {corrOpt}
+                          </span>
                         </td>
                         <td className="py-3.5 px-4 text-center">
                           {hasAudio ? (
@@ -598,11 +717,14 @@ export default function AdminDashboard({ onAdminStateChange }) {
 
                           {/* Edit info button */}
                           <button
-                            onClick={() => setEditingRound(song)}
+                            onClick={() => {
+                              setEditingRound(song);
+                              setEditModalError('');
+                            }}
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-950/70 hover:bg-red-900 text-red-300 border border-red-800/60 text-xs cursor-pointer"
                           >
                             <Edit3 className="w-3 h-3" />
-                            <span>Edit</span>
+                            <span>Configure</span>
                           </button>
                         </td>
                       </tr>
@@ -669,8 +791,8 @@ export default function AdminDashboard({ onAdminStateChange }) {
                 <tr className="bg-zinc-950 text-zinc-400 text-[11px] font-mono uppercase border-b border-zinc-800">
                   <th className="py-3 px-4">Round</th>
                   <th className="py-3 px-4">Survivor</th>
-                  <th className="py-3 px-4">Submitted Guess</th>
-                  <th className="py-3 px-4">Official Answer</th>
+                  <th className="py-3 px-4">Selected Option</th>
+                  <th className="py-3 px-4">Correct Option</th>
                   <th className="py-3 px-4 text-center">Result</th>
                   <th className="py-3 px-4 text-right">Time</th>
                 </tr>
@@ -683,34 +805,50 @@ export default function AdminDashboard({ onAdminStateChange }) {
                     </td>
                   </tr>
                 ) : (
-                  submissions.map((sub) => (
-                    <tr key={sub.id} className="hover:bg-zinc-900/40">
-                      <td className="py-3 px-4 font-mono font-bold text-red-400">#{sub.round_number}</td>
-                      <td className="py-3 px-4 font-semibold text-zinc-200">
-                        {sub.participant_name || sub.participant_id}
-                      </td>
-                      <td className="py-3 px-4 font-mono text-xs text-zinc-300">
-                        &ldquo;{sub.submitted_answer}&rdquo;
-                      </td>
-                      <td className="py-3 px-4 text-xs text-zinc-400">
-                        {sub.correct_answer || '--'}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        {sub.is_correct ? (
-                          <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800">
-                            +10 PTS
+                  submissions.map((sub) => {
+                    const selOpt = sub.selected_option || '??';
+                    const isTimeOut = selOpt === 'EXPIRED' || sub.submitted_answer === '[TIME_EXPIRED]';
+                    return (
+                      <tr key={sub.id} className="hover:bg-zinc-900/40">
+                        <td className="py-3 px-4 font-mono font-bold text-red-400">#{sub.round_number}</td>
+                        <td className="py-3 px-4 font-semibold text-zinc-200">
+                          {sub.participant_name || sub.participant_id}
+                        </td>
+                        <td className="py-3 px-4 text-xs font-mono">
+                          {isTimeOut ? (
+                            <span className="text-red-400 font-bold">[TIME EXPIRED]</span>
+                          ) : (
+                            <span className="text-zinc-200 font-semibold">
+                              <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-red-400 font-bold mr-1.5">
+                                Option {selOpt}
+                              </span>
+                              {sub.submitted_answer}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-xs text-zinc-300 font-mono">
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-800 text-emerald-400 font-bold mr-1.5">
+                            Option {sub.correct_option || 'A'}
                           </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-red-950 text-red-400 border border-red-800">
-                            0 PTS
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-right font-mono text-xs text-zinc-500">
-                        {sub.submitted_at ? new Date(sub.submitted_at).toLocaleTimeString() : '--'}
-                      </td>
-                    </tr>
-                  ))
+                          {sub.correct_answer || '--'}
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          {sub.is_correct ? (
+                            <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800">
+                              +10 PTS
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-red-950 text-red-400 border border-red-800">
+                              0 PTS
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono text-xs text-zinc-500">
+                          {sub.submitted_at ? new Date(sub.submitted_at).toLocaleTimeString() : '--'}
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -718,73 +856,137 @@ export default function AdminDashboard({ onAdminStateChange }) {
         </div>
       )}
 
-      {/* EDIT ROUND MODAL */}
+      {/* EDIT ROUND MODAL (MCQ CONFIGURATION) */}
       {editingRound && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
-          <div className="w-full max-w-lg bg-[#0e0e15] border border-red-900/60 rounded-3xl p-6 shadow-2xl">
-            <h3 className="text-lg font-cinzel font-bold text-white uppercase mb-4">
-              Edit Round #{editingRound.round_number}
-            </h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
+          <div className="w-full max-w-xl bg-[#0e0e15] border border-red-900/60 rounded-3xl p-6 sm:p-7 shadow-2xl my-8">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-zinc-800">
+              <h3 className="text-lg font-cinzel font-bold text-white uppercase flex items-center gap-2">
+                <span className="w-7 h-7 rounded-lg bg-red-950 border border-red-700 text-red-400 font-mono text-xs flex items-center justify-center font-bold">
+                  #{editingRound.round_number}
+                </span>
+                <span>Configure Round #{editingRound.round_number} Options</span>
+              </h3>
+              <button 
+                onClick={() => { setEditingRound(null); setEditModalError(''); }}
+                className="text-zinc-400 hover:text-white text-lg p-1"
+              >
+                &times;
+              </button>
+            </div>
+
+            {editModalError && (
+              <div className="mb-4 p-3 rounded-xl bg-red-950/80 border border-red-700 text-red-200 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{editModalError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSaveSongEdit} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold uppercase text-zinc-400 mb-1">Song Title</label>
+                <label className="block text-xs font-semibold uppercase text-zinc-400 mb-1">Song / Track Title</label>
                 <input
                   type="text"
                   value={editingRound.title || ''}
                   onChange={(e) => setEditingRound({ ...editingRound, title: e.target.value })}
+                  placeholder="e.g. Thriller - Michael Jackson"
                   required
-                  className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-zinc-100 outline-none"
+                  className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 focus:border-red-600 rounded-xl text-sm text-zinc-100 outline-none"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase text-zinc-400 mb-1">Correct Answer (Canonical)</label>
-                <input
-                  type="text"
-                  value={editingRound.correct_answer || ''}
-                  onChange={(e) => setEditingRound({ ...editingRound, correct_answer: e.target.value })}
-                  required
-                  className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-zinc-100 outline-none"
-                />
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Four Answer Options (A, B, C, D)
+                  </label>
+                  <span className="text-[11px] text-zinc-400 font-mono">
+                    Select radio for correct answer
+                  </span>
+                </div>
+
+                <div className="space-y-2.5">
+                  {[
+                    { key: 'A', field: 'option_a' },
+                    { key: 'B', field: 'option_b' },
+                    { key: 'C', field: 'option_c' },
+                    { key: 'D', field: 'option_d' }
+                  ].map(({ key, field }) => {
+                    const isCorrect = (editingRound.correct_option || 'A') === key;
+                    return (
+                      <div 
+                        key={key} 
+                        className={`p-2.5 rounded-xl border flex items-center gap-3 transition-all ${
+                          isCorrect 
+                            ? 'bg-red-950/30 border-red-600 ring-1 ring-red-600/50' 
+                            : 'bg-zinc-950/80 border-zinc-800'
+                        }`}
+                      >
+                        {/* Radio selector for correct answer */}
+                        <label className="flex items-center gap-2 cursor-pointer shrink-0 pl-1">
+                          <input
+                            type="radio"
+                            name="correct_option_choice"
+                            checked={isCorrect}
+                            onChange={() => setEditingRound({ ...editingRound, correct_option: key })}
+                            className="w-4 h-4 text-red-600 accent-red-600 cursor-pointer"
+                          />
+                          <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-cinzel text-xs font-bold ${
+                            isCorrect 
+                              ? 'bg-red-600 text-white shadow-[0_0_8px_rgba(220,38,38,0.8)]' 
+                              : 'bg-zinc-900 border border-zinc-700 text-zinc-400'
+                          }`}>
+                            {key}
+                          </span>
+                        </label>
+
+                        {/* Text input for option */}
+                        <input
+                          type="text"
+                          value={editingRound[field] || ''}
+                          onChange={(e) => setEditingRound({ ...editingRound, [field]: e.target.value })}
+                          placeholder={`Option ${key} text...`}
+                          required
+                          className="flex-1 px-3 py-1.5 bg-zinc-900/80 border border-zinc-800 focus:border-red-600 rounded-lg text-sm text-zinc-100 outline-none"
+                        />
+
+                        {isCorrect && (
+                          <span className="text-[10px] font-mono font-bold uppercase text-emerald-400 bg-emerald-950/80 px-2 py-1 rounded border border-emerald-800 shrink-0">
+                            CORRECT ANSWER
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold uppercase text-zinc-400 mb-1">
-                  Accepted Variations (comma separated)
+                  Cryptic Hint (Optional)
                 </label>
-                <input
-                  type="text"
-                  value={Array.isArray(editingRound.accepted_answers) ? editingRound.accepted_answers.join(', ') : editingRound.accepted_answers || ''}
-                  onChange={(e) => setEditingRound({ ...editingRound, accepted_answers: e.target.value })}
-                  placeholder="e.g. halloween, john carpenter, michael myers theme"
-                  className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-zinc-100 outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold uppercase text-zinc-400 mb-1">Cryptic Hint (Optional)</label>
                 <input
                   type="text"
                   value={editingRound.hint || ''}
                   onChange={(e) => setEditingRound({ ...editingRound, hint: e.target.value })}
-                  className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-zinc-100 outline-none"
+                  placeholder="e.g. Vincent Price's laughter echoes through the night..."
+                  className="w-full px-3.5 py-2 bg-zinc-950 border border-zinc-800 focus:border-red-600 rounded-xl text-sm text-zinc-100 outline-none"
                 />
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-zinc-800">
                 <button
                   type="button"
-                  onClick={() => setEditingRound(null)}
-                  className="px-4 py-2 rounded-xl bg-zinc-900 text-zinc-400 text-xs font-semibold cursor-pointer"
+                  onClick={() => { setEditingRound(null); setEditModalError(''); }}
+                  className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 text-xs font-semibold cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold shadow-[0_0_15px_rgba(220,38,38,0.5)] cursor-pointer"
+                  className="px-6 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold shadow-[0_0_15px_rgba(220,38,38,0.6)] cursor-pointer"
                 >
-                  Save Round
+                  Save Round Options
                 </button>
               </div>
             </form>

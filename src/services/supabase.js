@@ -52,13 +52,20 @@ function setLocalItem(key, value) {
 // Seed local storage with default 30 horror songs and settings
 export function initializeLocalStorageIfNeeded() {
   const existingSongs = getLocalItem(STORAGE_KEYS.SONGS, null);
-  if (!existingSongs || existingSongs.length === 0) {
+  const needsMigration = !existingSongs || existingSongs.length === 0 || !existingSongs[0].option_a;
+  if (needsMigration) {
     const formatted = DEFAULT_HORROR_SONGS.map((song, idx) => ({
       id: `song-${idx + 1}`,
       round_number: song.round_number,
       title: song.title,
       artist: song.artist,
       audio_path: song.audio_path || '',
+      duration_seconds: song.duration_seconds || 8.0,
+      option_a: song.option_a,
+      option_b: song.option_b,
+      option_c: song.option_c,
+      option_d: song.option_d,
+      correct_option: song.correct_option || 'A',
       correct_answer: song.correct_answer,
       accepted_answers: song.accepted_answers,
       hint: song.hint,
@@ -157,7 +164,7 @@ export const horrorApi = {
 
   // 2. SONGS
   async getPlayableSongs() {
-    // Participants fetch: returns songs WITHOUT correct_answer unless answers_revealed is true!
+    // Participants fetch: returns songs with 4 options, strictly withholding correct_option unless answers_revealed is true!
     const settings = await this.getGameSettings();
     const answersRevealed = Boolean(settings?.answers_revealed);
 
@@ -180,16 +187,22 @@ export const horrorApi = {
       title: song.title,
       artist: song.artist,
       audio_path: song.audio_path,
+      duration_seconds: song.duration_seconds || 8.0,
       hint: song.hint,
       synth_motif: song.synth_motif,
-      // Strictly protect answers before reveal
-      correct_answer: answersRevealed ? song.correct_answer : null,
+      option_a: song.option_a || '',
+      option_b: song.option_b || '',
+      option_c: song.option_c || '',
+      option_d: song.option_d || '',
+      // Strictly protect correct option and answers before reveal
+      correct_option: answersRevealed ? song.correct_option : null,
+      correct_answer: answersRevealed ? (song.correct_answer || song[`option_${(song.correct_option || 'A').toLowerCase()}`]) : null,
       accepted_answers: answersRevealed ? song.accepted_answers : null
     }));
   },
 
   async getAllAdminSongs() {
-    // Admin only: returns all songs with answers and metadata
+    // Admin only: returns all songs with 4 options, correct answer, and metadata
     if (isSupabaseConfigured) {
       try {
         const { data, error } = await supabase
@@ -207,21 +220,54 @@ export const horrorApi = {
   },
 
   async saveSong(songData) {
+    const optionA = (songData.option_a || '').trim();
+    const optionB = (songData.option_b || '').trim();
+    const optionC = (songData.option_c || '').trim();
+    const optionD = (songData.option_d || '').trim();
+    const correctOpt = (songData.correct_option || '').trim().toUpperCase();
+
+    if (!optionA || !optionB || !optionC || !optionD) {
+      throw new Error('All four options (Option A, B, C, and D) must be provided.');
+    }
+
+    if (!['A', 'B', 'C', 'D'].includes(correctOpt)) {
+      throw new Error('Exactly one correct answer option (A, B, C, or D) must be selected.');
+    }
+
+    // Check for duplicate options (ignoring capitalization and extra spaces)
+    const norm = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+    const optionsNorm = [norm(optionA), norm(optionB), norm(optionC), norm(optionD)];
+    const uniqueOptions = new Set(optionsNorm);
+    if (uniqueOptions.size < 4) {
+      throw new Error('Options cannot contain duplicates within the same round (case and spacing ignored).');
+    }
+
+    // Map correct option letter to answer text
+    const optionMap = { A: optionA, B: optionB, C: optionC, D: optionD };
+    const canonicalAnswer = optionMap[correctOpt] || optionA;
+
+    const payload = {
+      id: songData.id || undefined,
+      round_number: songData.round_number,
+      title: songData.title || `Round ${songData.round_number}`,
+      audio_path: songData.audio_path || '',
+      duration_seconds: Number(songData.duration_seconds) || 8.0,
+      option_a: optionA,
+      option_b: optionB,
+      option_c: optionC,
+      option_d: optionD,
+      correct_option: correctOpt,
+      correct_answer: canonicalAnswer,
+      accepted_answers: [canonicalAnswer],
+      hint: songData.hint || '',
+      synth_motif: songData.synth_motif
+    };
+
     if (isSupabaseConfigured) {
       try {
         const { data, error } = await supabase
           .from('songs')
-          .upsert({
-            id: songData.id || undefined,
-            round_number: songData.round_number,
-            title: songData.title,
-            audio_path: songData.audio_path,
-            correct_answer: songData.correct_answer,
-            accepted_answers: Array.isArray(songData.accepted_answers)
-              ? songData.accepted_answers
-              : (songData.accepted_answers || '').split(',').map(s => s.trim()).filter(Boolean),
-            hint: songData.hint || ''
-          })
+          .upsert(payload)
           .select()
           .single();
         if (error) throw error;
@@ -235,11 +281,8 @@ export const horrorApi = {
     const index = songs.findIndex(s => s.round_number === songData.round_number || s.id === songData.id);
 
     const updatedSong = {
-      ...songData,
-      id: songData.id || `song-${songData.round_number}`,
-      accepted_answers: Array.isArray(songData.accepted_answers)
-        ? songData.accepted_answers
-        : (songData.accepted_answers || '').split(',').map(s => s.trim()).filter(Boolean)
+      ...payload,
+      id: songData.id || `song-${songData.round_number}`
     };
 
     if (index >= 0) {
@@ -478,6 +521,7 @@ export const horrorApi = {
         can_play: false,
         is_correct: sub.is_correct,
         points_awarded: sub.points_awarded,
+        selected_option: sub.selected_option,
         submitted_answer: sub.submitted_answer,
         server_now: now.toISOString()
       };
@@ -525,6 +569,7 @@ export const horrorApi = {
               participant_id: participantId,
               song_id: songId,
               round_number: session.round_number,
+              selected_option: 'EXPIRED',
               submitted_answer: '[TIME_EXPIRED]',
               is_correct: false,
               points_awarded: 0,
@@ -549,7 +594,7 @@ export const horrorApi = {
   },
 
   // 5. SUBMIT ANSWER (SERVER-SIDE / MOCK RPC WITH DEADLINE VERIFICATION)
-  async submitAnswer(participantId, songId, submittedAnswer) {
+  async submitAnswer(participantId, songId, selectedOption) {
     if (!participantId || !songId) {
       throw new Error('Participant ID and Song ID are required.');
     }
@@ -560,7 +605,7 @@ export const horrorApi = {
         const { data, error } = await supabase.rpc('submit_song_answer', {
           p_participant_id: participantId,
           p_song_id: songId,
-          p_submitted_answer: submittedAnswer
+          p_selected_option: selectedOption
         });
 
         if (error) throw error;
@@ -573,7 +618,7 @@ export const horrorApi = {
       }
     }
 
-    // Local Horror Engine Answer Checking
+    // Local Horror Engine MCQ Answer Checking
     const settings = getLocalItem(STORAGE_KEYS.SETTINGS, { game_status: 'active' });
     if (settings.game_status !== 'active') {
       throw new Error(`The event is currently ${settings.game_status}. Answers can only be submitted during active rounds.`);
@@ -607,7 +652,9 @@ export const horrorApi = {
       }
     }
 
-    if (isExpired || submittedAnswer === '[TIME_EXPIRED]') {
+    const cleanOption = (selectedOption || '').trim().toUpperCase();
+
+    if (isExpired || cleanOption === '[TIME_EXPIRED]' || cleanOption === 'EXPIRED') {
       if (session) {
         session.state = 'time_expired';
         session.submitted_at = new Date().toISOString();
@@ -619,6 +666,7 @@ export const horrorApi = {
         participant_id: participantId,
         song_id: songId,
         round_number: song.round_number,
+        selected_option: 'EXPIRED',
         submitted_answer: '[TIME_EXPIRED]',
         is_correct: false,
         points_awarded: 0,
@@ -652,6 +700,7 @@ export const horrorApi = {
       return {
         success: true,
         round_number: song.round_number,
+        selected_option: 'EXPIRED',
         is_correct: false,
         is_expired: true,
         points_awarded: 0,
@@ -661,9 +710,23 @@ export const horrorApi = {
       };
     }
 
-    // Server-side normalized answer check on valid submission
-    const isCorrect = checkAnswerMatch(submittedAnswer, song.correct_answer, song.accepted_answers);
-    const pointsAwarded = computePoints(isCorrect);
+    // Validate MCQ Selection (A, B, C, or D)
+    if (!['A', 'B', 'C', 'D'].includes(cleanOption)) {
+      throw new Error('Please select a valid option: Option A, B, C, or D.');
+    }
+
+    // Compare with stored correct option
+    const correctOption = (song.correct_option || 'A').toUpperCase();
+    const isCorrect = cleanOption === correctOption;
+    const pointsAwarded = isCorrect ? 10 : 0;
+
+    const optionMap = {
+      A: song.option_a,
+      B: song.option_b,
+      C: song.option_c,
+      D: song.option_d
+    };
+    const optionText = optionMap[cleanOption] || cleanOption;
 
     if (session) {
       session.state = 'submitted';
@@ -676,7 +739,8 @@ export const horrorApi = {
       participant_id: participantId,
       song_id: songId,
       round_number: song.round_number,
-      submitted_answer: submittedAnswer,
+      selected_option: cleanOption,
+      submitted_answer: optionText,
       is_correct: isCorrect,
       points_awarded: pointsAwarded,
       submitted_at: new Date().toISOString()
@@ -710,12 +774,13 @@ export const horrorApi = {
 
     // Dispatch custom event for live local updates
     window.dispatchEvent(new CustomEvent('horror_submission_made', {
-      detail: { participantId, roundNumber: song.round_number, isCorrect, totalScore }
+      detail: { participantId, roundNumber: song.round_number, selectedOption: cleanOption, isCorrect, totalScore }
     }));
 
     return {
       success: true,
       round_number: song.round_number,
+      selected_option: cleanOption,
       is_correct: isCorrect,
       is_expired: false,
       points_awarded: pointsAwarded,
@@ -794,7 +859,7 @@ export const horrorApi = {
       try {
         const { data, error } = await supabase
           .from('submissions')
-          .select('*, participants(name, participant_code), songs(title, correct_answer)')
+          .select('*, participants(name, participant_code), songs(title, correct_option, correct_answer, option_a, option_b, option_c, option_d)')
           .order('submitted_at', { ascending: false });
         if (!error && data) return data;
       } catch (e) {
@@ -813,7 +878,12 @@ export const horrorApi = {
         participant_name: part?.name || 'Unknown Survivor',
         participant_code: part?.participant_code || 'SURVIVOR-????',
         song_title: song?.title || `Round ${sub.round_number}`,
-        correct_answer: song?.correct_answer || ''
+        correct_option: song?.correct_option || 'A',
+        correct_answer: song?.correct_answer || '',
+        option_a: song?.option_a || '',
+        option_b: song?.option_b || '',
+        option_c: song?.option_c || '',
+        option_d: song?.option_d || ''
       };
     });
   },
