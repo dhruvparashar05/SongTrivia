@@ -27,6 +27,7 @@ export default function GamePage({
   const [gameSettings, setGameSettings] = useState({ game_status: 'waiting', answers_revealed: false });
   const [loading, setLoading] = useState(true);
   const [checkingRoundState, setCheckingRoundState] = useState(false);
+  const [isAutoAdvancing, setIsAutoAdvancing] = useState(false);
   
   const [stats, setStats] = useState({
     score: participant?.total_score || 0,
@@ -35,6 +36,7 @@ export default function GamePage({
   });
 
   const timerIntervalRef = useRef(null);
+  const autoAdvanceTimeoutRef = useRef(null);
 
   // 1. Initial Load of Songs, Submissions & Settings
   useEffect(() => {
@@ -118,6 +120,7 @@ export default function GamePage({
       window.removeEventListener('horror_settings_updated', handleSettingsUpdate);
       window.removeEventListener('horror_game_reset', handleReset);
       clearInterval(interval);
+      clearTimeout(autoAdvanceTimeoutRef.current);
     };
   }, [participant]);
 
@@ -131,6 +134,8 @@ export default function GamePage({
   useEffect(() => {
     let isMounted = true;
     clearInterval(timerIntervalRef.current);
+    clearTimeout(autoAdvanceTimeoutRef.current);
+    setIsAutoAdvancing(false);
 
     async function checkState() {
       if (!currentSong || !participant?.id) return;
@@ -196,6 +201,7 @@ export default function GamePage({
     return () => {
       isMounted = false;
       clearInterval(timerIntervalRef.current);
+      clearTimeout(autoAdvanceTimeoutRef.current);
     };
   }, [currentRoundIndex, currentSong?.id, participant?.id, currentSubmission]);
 
@@ -300,6 +306,15 @@ export default function GamePage({
         type: 'wrong',
         message: "TIME'S UP! The 10-second deadline expired. 0 points awarded."
       });
+
+      // Automatically advance to next round after timeout
+      if (currentRoundIndex < totalRounds - 1) {
+        setIsAutoAdvancing(true);
+        clearTimeout(autoAdvanceTimeoutRef.current);
+        autoAdvanceTimeoutRef.current = setTimeout(() => {
+          handleNextRound();
+        }, 1200);
+      }
     } catch (err) {
       console.error('Timeout submit error:', err);
     } finally {
@@ -384,6 +399,15 @@ export default function GamePage({
           colors: ['#dc2626', '#b91c1c', '#7f1d1d', '#ffffff']
         });
       }
+
+      // Automatically advance to next round after submitting answer
+      if (currentRoundIndex < totalRounds - 1) {
+        setIsAutoAdvancing(true);
+        clearTimeout(autoAdvanceTimeoutRef.current);
+        autoAdvanceTimeoutRef.current = setTimeout(() => {
+          handleNextRound();
+        }, 1200);
+      }
     } catch (err) {
       console.error('Answer submission error:', err);
       setSubmissionFeedback({
@@ -396,6 +420,8 @@ export default function GamePage({
   };
 
   const handleNextRound = () => {
+    setIsAutoAdvancing(false);
+    clearTimeout(autoAdvanceTimeoutRef.current);
     setSubmissionFeedback(null);
     setSelectedOption(null);
     setRoundState('ready');
@@ -842,17 +868,14 @@ export default function GamePage({
               </div>
             )}
 
-            {/* Advance to Next Round Button */}
+            {/* Automatic round advance status indicator (Proceed button removed) */}
             {currentRoundIndex < totalRounds - 1 ? (
-              <div className="pt-4">
-                <button
-                  onClick={handleNextRound}
-                  className="px-8 py-3 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs tracking-wider transition-all shadow-[0_0_20px_rgba(220,38,38,0.6)] cursor-pointer inline-flex items-center gap-2"
-                >
-                  <span>PROCEED TO ROUND {currentRoundNum + 1}</span>
-                  <ArrowRight className="w-4 h-4" />
-                </button>
-              </div>
+              isAutoAdvancing ? (
+                <div className="pt-4 flex items-center justify-center gap-2.5 text-xs font-mono text-red-400 animate-pulse">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                  <span className="font-semibold tracking-wide">Advancing to Round {currentRoundNum + 1}...</span>
+                </div>
+              ) : null
             ) : (
               <div className="pt-4">
                 <button
@@ -1054,9 +1077,11 @@ export default function GamePage({
                 disabled={!isAccessible}
                 onClick={() => {
                   if (isAccessible && idx !== currentRoundIndex && !isAudioPlaying && !isAnswering) {
+                    setIsAutoAdvancing(false);
+                    clearTimeout(autoAdvanceTimeoutRef.current);
                     setCurrentRoundIndex(idx);
                     setSubmissionFeedback(null);
-                    setAnswerInput('');
+                    setSelectedOption(null);
                   }
                 }}
                 className={`py-1.5 px-2 rounded-lg text-xs font-mono border transition-all ${bgClass}`}
